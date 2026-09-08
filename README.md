@@ -55,6 +55,8 @@ powershell.exe -ExecutionPolicy Bypass -File .\WifiClashGuard.ps1 -Settings
 4. 从托盘图标进入“设置（SSID 与 Clash 路径）”，手动添加需要提醒的 Wi-Fi 名称，并选择 Clash Verge 的 exe 文件。
 5. 保存后，可以使用“启动 Clash Verge”菜单启动；危险 SSID 下会先弹窗确认。
 
+如果托盘程序启动时发现已配置的 Clash Verge 正在运行，并且当前 SSID 位于危险名单，程序会立即显示网络安全提醒。该提醒每次托盘启动最多显示一次；`--launch` 和设置窗口不会触发这条启动提醒。
+
 ## 把它接到桌面快捷方式
 
 将原 Clash Verge 快捷方式的目标改成下面的命令，并把“起始位置”设为本目录：

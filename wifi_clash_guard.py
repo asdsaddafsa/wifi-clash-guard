@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from ctypes import wintypes
 import json
 import os
 import queue
@@ -13,7 +14,7 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import Any
+from typing import Any, Iterable
 
 # Keep command-line text readable in Chinese Windows terminals. Tkinter GUI
 # strings do not depend on this, but --help and diagnostics do.
@@ -295,6 +296,144 @@ def is_dangerous(ssid: str | None, dangerous_ssids: list[str]) -> bool:
     return any(folded == item.casefold() for item in dangerous_ssids)
 
 
+def normalize_executable_path(path: str | os.PathLike[str]) -> str:
+    """Return a comparable absolute path for a configured executable."""
+    raw_path = str(os.fspath(path)).strip().strip('"')
+    if not raw_path:
+        return ""
+    if os.name == "nt":
+        extended_unc_prefix = "\\\\?\\UNC"
+        extended_prefix = "\\\\?\\"
+        device_prefix = "\\\\.\\"
+        if raw_path.casefold().startswith(extended_unc_prefix.casefold() + "\\"):
+            raw_path = "\\\\" + raw_path[len(extended_unc_prefix) + 1 :]
+        elif raw_path.startswith(extended_prefix) or raw_path.startswith(device_prefix):
+            raw_path = raw_path[4:]
+    candidate = Path(raw_path).expanduser()
+    try:
+        candidate = candidate.resolve(strict=False)
+    except (OSError, RuntimeError):
+        candidate = candidate.absolute()
+    return os.path.normcase(os.path.normpath(str(candidate)))
+
+
+def _running_process_paths() -> list[str]:
+    """Return full executable paths for running Windows processes."""
+    if os.name != "nt":
+        return []
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    process_query_limited_information = 0x1000
+    snapshot_flags = 0x00000002  # TH32CS_SNAPPROCESS
+    invalid_handle_value = ctypes.c_void_p(-1).value
+    kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(ProcessEntry32W),
+    ]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(ProcessEntry32W),
+    ]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    try:
+        snapshot = kernel32.CreateToolhelp32Snapshot(snapshot_flags, 0)
+    except (AttributeError, OSError):
+        return []
+    if snapshot in (None, invalid_handle_value):
+        return []
+
+    paths: list[str] = []
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return paths
+        while True:
+            process = kernel32.OpenProcess(
+                process_query_limited_information, False, entry.th32ProcessID
+            )
+            if process:
+                try:
+                    buffer = ctypes.create_unicode_buffer(32768)
+                    size = wintypes.DWORD(len(buffer))
+                    if kernel32.QueryFullProcessImageNameW(
+                        process, 0, buffer, ctypes.byref(size)
+                    ):
+                        paths.append(buffer.value[: size.value])
+                finally:
+                    kernel32.CloseHandle(process)
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return paths
+
+
+def is_configured_clash_running(
+    clash_path: str, process_paths: Iterable[str] | None = None
+) -> bool:
+    """Check whether the configured executable path belongs to a running process."""
+    normalized_configured = normalize_executable_path(clash_path)
+    if not normalized_configured:
+        return False
+    try:
+        paths = _running_process_paths() if process_paths is None else process_paths
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+    return any(
+        normalized_configured == normalize_executable_path(process_path)
+        for process_path in paths
+    )
+
+
+def should_show_startup_warning(
+    ssid: str | None,
+    dangerous_ssids: list[str],
+    clash_path: str,
+    process_paths: Iterable[str] | None = None,
+) -> bool:
+    """Return whether the tray startup informational warning should be shown."""
+    return is_dangerous(ssid, dangerous_ssids) and is_configured_clash_running(
+        clash_path, process_paths
+    )
+
+
 def start_clash(clash_path: str) -> tuple[bool, str]:
     path = Path(clash_path).expanduser()
     if not path.is_file():
@@ -497,6 +636,7 @@ class GuardApp:
         self.root.withdraw()
         self.icon = None
         self._ui_actions: queue.Queue = queue.Queue()
+        self._startup_warning_shown = False
 
     def run(self) -> None:
         if pystray is None:
@@ -518,8 +658,27 @@ class GuardApp:
             ),
         )
         self.icon.run_detached()
+        self.root.after(0, self._show_startup_warning)
         self.root.after(50, self._drain_ui_actions)
         self.root.mainloop()
+
+    def _show_startup_warning(self) -> None:
+        if self._startup_warning_shown:
+            return
+        self._startup_warning_shown = True
+        clash_path = self.config.get("clash_path", "")
+        if not is_configured_clash_running(clash_path):
+            return
+        ssid = get_current_ssid()
+        if not is_dangerous(ssid, self.config["dangerous_ssids"]):
+            return
+        shown = ssid if ssid is not None else "无法读取"
+        messagebox.showwarning(
+            "网络安全提醒",
+            f"当前 Wi‑Fi：{shown}\n\n"
+            "检测到配置的 Clash Verge 已经在运行，且当前 SSID 位于危险名单中。",
+            parent=self.root,
+        )
 
     def _drain_ui_actions(self) -> None:
         """Run tray callbacks on Tk's main thread.

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Launch,
     [switch]$Check,
     [switch]$Tray,
@@ -81,6 +81,61 @@ function Test-DangerousSSID([string]$SSID, [object]$DangerousSSIDs) {
         if ($SSID.Equals([string]$item, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
     }
     return $false
+}
+
+function ConvertTo-NormalizedFullPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    try {
+        $expanded = [Environment]::ExpandEnvironmentVariables($Path).Trim().Trim('"')
+        if ($expanded.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $expanded = '\\' + $expanded.Substring(8)
+        }
+        elseif ($expanded.StartsWith('\\?\') -or $expanded.StartsWith('\\.\')) {
+            $expanded = $expanded.Substring(4)
+        }
+        if ([System.IO.Path]::IsPathRooted($expanded)) {
+            $fullPath = [System.IO.Path]::GetFullPath($expanded)
+        }
+        else {
+            $basePath = (Get-Location).ProviderPath
+            $fullPath = [System.IO.Path]::GetFullPath((Join-Path $basePath $expanded))
+        }
+        return $fullPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    }
+    catch { return $null }
+}
+
+function Test-ConfiguredClashRunning([hashtable]$Config) {
+    try {
+        $configuredPath = ConvertTo-NormalizedFullPath ([string]$Config.clash_path)
+        if ([string]::IsNullOrWhiteSpace($configuredPath)) { return $false }
+
+        foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+            $runningPath = ConvertTo-NormalizedFullPath ([string]$process.ExecutablePath)
+            if (-not [string]::IsNullOrWhiteSpace($runningPath) -and
+                $configuredPath.Equals($runningPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+    }
+    catch { return $false }
+    return $false
+}
+
+function Show-StartupWarningIfNeeded([hashtable]$Config) {
+    try {
+        if (-not (Test-ConfiguredClashRunning $Config)) { return }
+        $ssid = Get-CurrentSSID
+        if (-not (Test-DangerousSSID $ssid $Config.dangerous_ssids)) { return }
+
+        [System.Windows.Forms.MessageBox]::Show(
+            "检测到 Clash Verge 已在运行。`n`n当前 Wi-Fi：$ssid`n`n该网络在危险 SSID 名单中，请注意网络安全。",
+            '网络安全提醒',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+    }
+    catch { }
 }
 
 function Set-Startup([bool]$Enabled) {
@@ -297,6 +352,14 @@ function Start-TrayApp {
         $context.ExitThread()
     })
     $notify.Add_DoubleClick({ Confirm-AndStartClash $config })
+
+    $startupTimer = New-Object System.Windows.Forms.Timer
+    $startupTimer.Interval = 100
+    $startupTimer.Add_Tick({
+        try { $startupTimer.Stop(); $startupTimer.Dispose() } catch { }
+        Show-StartupWarningIfNeeded $config
+    })
+    $startupTimer.Start()
     [System.Windows.Forms.Application]::Run($context)
 }
 

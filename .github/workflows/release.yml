@@ -32,6 +32,16 @@ jobs:
         shell: pwsh
         run: python -c "import tkinter as tk; root = tk.Tk(); root.withdraw(); root.destroy()"
 
+      - name: Parse PowerShell fallback scripts
+        shell: pwsh
+        run: |
+          $errors = $null
+          $tokens = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'WifiClashGuard.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'start_guard.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+
       - name: Build Windows executable
         shell: pwsh
         run: |
@@ -50,6 +60,7 @@ jobs:
             - Manually maintain a dangerous SSID list.
             - Check the current Wi-Fi SSID before launching Clash Verge.
             - Warn and require confirmation on a listed network.
+            - Warn at tray startup when Clash Verge is already running on a listed network.
             - Optional Windows startup tray application.
 
             The executable is a Windows x64 build. Configuration is stored under `%APPDATA%\WifiClashGuard`.
