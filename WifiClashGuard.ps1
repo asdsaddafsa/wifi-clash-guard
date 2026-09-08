@@ -1,7 +1,8 @@
 param(
     [switch]$Launch,
     [switch]$Check,
-    [switch]$Tray
+    [switch]$Tray,
+    [switch]$Settings
 )
 
 $ErrorActionPreference = 'Stop'
@@ -249,7 +250,7 @@ function New-SettingsForm([hashtable]$Config) {
     return $form
 }
 
-function Start-TrayApp {
+function Start-TrayApp([bool]$OpenSettings = $false) {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName Microsoft.VisualBasic
@@ -286,6 +287,18 @@ function Start-TrayApp {
         $context.ExitThread()
     })
     $notify.Add_DoubleClick({ Confirm-AndStartClash $config })
+    if ($OpenSettings) {
+        $timer = New-Object System.Windows.Forms.Timer
+        $timer.Interval = 150
+        $timer.Add_Tick({
+            $timer.Stop()
+            $form = New-SettingsForm $config
+            [void]$form.ShowDialog()
+            $form.Dispose()
+            $timer.Dispose()
+        })
+        $timer.Start()
+    }
     [System.Windows.Forms.Application]::Run($context)
 }
 
@@ -302,4 +315,4 @@ if ($Launch) {
     exit 0
 }
 
-Start-TrayApp
+Start-TrayApp $Settings

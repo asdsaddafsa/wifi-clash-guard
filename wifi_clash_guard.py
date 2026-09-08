@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import queue
@@ -91,9 +92,6 @@ def get_current_ssid() -> str | None:
         completed = subprocess.run(
             ["netsh", "wlan", "show", "interfaces"],
             capture_output=True,
-            text=True,
-            encoding="mbcs" if os.name == "nt" else "utf-8",
-            errors="replace",
             timeout=5,
             check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -101,12 +99,48 @@ def get_current_ssid() -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
 
+    output = decode_netsh_output(completed.stdout)
+
     # SSID is deliberately matched as a complete key, so BSSID is ignored.
-    for line in completed.stdout.splitlines():
+    for line in output.splitlines():
         match = re.match(r"^\s*SSID\s*:\s*(.*)\s*$", line, re.IGNORECASE)
         if match and match.group(1).strip():
             return match.group(1).strip()
     return None
+
+
+def decode_netsh_output(raw: bytes) -> str:
+    """Decode netsh output without assuming the console code page."""
+    if not isinstance(raw, bytes):
+        return str(raw)
+
+    encodings = ["utf-8-sig"]
+    if os.name == "nt":
+        encodings.extend(["mbcs", "oem"])
+    encodings.extend(["gb18030", "latin-1"])
+
+    candidates: list[str] = []
+    for encoding in encodings:
+        try:
+            decoded = raw.decode(encoding, errors="replace")
+        except (LookupError, UnicodeError):
+            continue
+        if decoded not in candidates:
+            candidates.append(decoded)
+
+    def score(value: str) -> tuple[int, int, int, int, int]:
+        replacements = value.count("\ufffd")
+        private_use = sum(0xE000 <= ord(char) <= 0xF8FF for char in value)
+        cjk = sum(
+            (0x3400 <= ord(char) <= 0x4DBF)
+            or (0x4E00 <= ord(char) <= 0x9FFF)
+            for char in value
+        )
+        controls = sum(ord(char) < 32 and char not in "\r\n\t" for char in value)
+        printable = sum(char.isprintable() or char in "\r\n\t" for char in value)
+        return (-replacements, -private_use, cjk, -controls, printable)
+
+    return max(candidates, key=score, default="")
 
 
 def is_dangerous(ssid: str | None, dangerous_ssids: list[str]) -> bool:
@@ -166,6 +200,17 @@ def tray_image():
     return image
 
 
+def show_native_error(message: str) -> None:
+    """Show an error even when Tk cannot initialize its Tcl/Tk runtime."""
+    if os.name == "nt":
+        try:
+            ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)
+            return
+        except (AttributeError, OSError):
+            pass
+    print(message, file=sys.stderr)
+
+
 class GuardApp:
     def __init__(self) -> None:
         self.config = load_config()
@@ -173,8 +218,9 @@ class GuardApp:
         self.root.withdraw()
         self.icon = None
         self._ui_actions: queue.Queue = queue.Queue()
+        self.settings_window: tk.Toplevel | None = None
 
-    def run(self) -> None:
+    def run(self, open_settings: bool = False) -> None:
         if pystray is None:
             messagebox.showerror(
                 APP_NAME,
@@ -195,6 +241,8 @@ class GuardApp:
         )
         self.icon.run_detached()
         self.root.after(50, self._drain_ui_actions)
+        if open_settings:
+            self.root.after(150, self.open_settings)
         self.root.mainloop()
 
     def _drain_ui_actions(self) -> None:
@@ -262,11 +310,17 @@ class GuardApp:
         messagebox.showinfo(APP_NAME, f"当前 SSID：{text}")
 
     def open_settings(self) -> None:
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            self.settings_window.deiconify()
+            self.settings_window.lift()
+            self.settings_window.focus_force()
+            return
+
         window = tk.Toplevel(self.root)
+        self.settings_window = window
         window.title("Wi-Fi Clash Guard 设置")
         window.resizable(False, False)
         window.transient(self.root)
-        window.grab_set()
 
         frame = ttk.Frame(window, padding=14)
         frame.grid(sticky="nsew")
@@ -330,6 +384,14 @@ class GuardApp:
             row=7, column=0, columnspan=2, sticky="w", pady=(0, 8)
         )
 
+        def close_window() -> None:
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            self.settings_window = None
+            window.destroy()
+
         def save_and_close() -> None:
             values = [ssid_list.get(i).strip() for i in range(ssid_list.size())]
             values = normalized_ssids(values)
@@ -341,13 +403,21 @@ class GuardApp:
             if not ok:
                 messagebox.showerror(APP_NAME, error, parent=window)
                 return
-            window.destroy()
+            close_window()
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=8, column=0, columnspan=2, sticky="e")
-        ttk.Button(buttons, text="取消", command=window.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(buttons, text="取消", command=close_window).pack(side=tk.RIGHT, padx=(8, 0))
         ttk.Button(buttons, text="保存", command=save_and_close).pack(side=tk.RIGHT)
-        window.protocol("WM_DELETE_WINDOW", window.destroy)
+
+        # A Toplevel transient to a withdrawn root can otherwise appear behind
+        # the desktop on some Windows configurations.
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        window.update_idletasks()
+        window.deiconify()
+        window.lift()
+        window.focus_force()
+        window.grab_set()
 
 
 def launch_once() -> int:
@@ -382,11 +452,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=APP_NAME)
     parser.add_argument("--launch", action="store_true", help="检查网络后启动 Clash Verge")
     parser.add_argument("--tray", action="store_true", help="启动托盘程序")
+    parser.add_argument("--settings", action="store_true", help="启动托盘程序并直接打开设置")
     args = parser.parse_args()
-    if args.launch:
-        return launch_once()
-    GuardApp().run()
-    return 0
+    try:
+        if args.launch:
+            return launch_once()
+        GuardApp().run(open_settings=args.settings)
+        return 0
+    except tk.TclError as exc:
+        show_native_error(
+            "图形界面组件 Tcl/Tk 初始化失败，无法打开设置窗口。\n\n"
+            "请改用同目录的 WifiClashGuard.ps1 -Settings，或重新安装带 Tcl/Tk 的 Python。\n\n"
+            f"详细信息：{exc}"
+        )
+        return 3
 
 
 if __name__ == "__main__":
