@@ -92,7 +92,7 @@ def decode_ssid_bytes(raw: bytes) -> str:
         return ""
 
     candidates: list[str] = []
-    for encoding in ("utf-8-sig", "mbcs", "gb18030", "big5", "latin-1"):
+    for encoding in ("utf-8-sig", "gb18030", "big5", "mbcs", "oem", "latin-1"):
         try:
             decoded = raw.decode(encoding, errors="strict")
         except (LookupError, UnicodeDecodeError):
@@ -101,7 +101,8 @@ def decode_ssid_bytes(raw: bytes) -> str:
             candidates.append(decoded)
 
     # Prefer the first strict candidate. UTF-8 is checked first, while a
-    # legacy Chinese SSID falls through to the Windows ANSI code page/GB18030.
+    # legacy Chinese SSID falls through to GB18030 before the machine's ANSI
+    # code page. This keeps the result independent of the runner's locale.
     return candidates[0].strip() if candidates else raw.decode("latin-1", errors="replace").strip()
 
 
