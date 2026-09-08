@@ -1,0 +1,29 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment variables and local configuration
+.env
+.env.*
+*.invalid.json
+*.local.json
+
+# Build outputs and packaging metadata
+build/
+dist/
+*.spec
+
+# Logs and local diagnostics
+*.log
+*.trace
+
+# IDE and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

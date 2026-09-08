@@ -1,0 +1,48 @@
+name: Build and publish Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: python -m pip install --upgrade pip; python -m pip install -r requirements.txt
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name WifiClashGuard wifi_clash_guard.py
+          Copy-Item 'dist\WifiClashGuard.exe' "dist\WifiClashGuard-${{ github.ref_name }}-windows-x64.exe"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Wi-Fi Clash Guard ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            Windows x64 release for Wi-Fi Clash Guard.
+
+            Features:
+            - Manually maintain a dangerous SSID list.
+            - Check the current Wi-Fi SSID before launching Clash Verge.
+            - Warn and require confirmation on a listed network.
+            - Optional Windows startup tray application.
+
+            The executable is a Windows x64 build. Configuration is stored under `%APPDATA%\WifiClashGuard`.
+          files: dist/WifiClashGuard-${{ github.ref_name }}-windows-x64.exe
