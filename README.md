@@ -11,7 +11,7 @@ cd C:\路径\wifi-clash-guard
 powershell.exe -ExecutionPolicy Bypass -File .\WifiClashGuard.ps1
 ```
 
-启动后，从右下角托盘图标进入“管理危险 SSID”，手动添加需要提醒的 Wi-Fi 名称，并选择 Clash Verge 的 exe 文件。
+启动后，从右下角托盘图标进入“设置（SSID 与 Clash 路径）”，手动添加需要提醒的 Wi-Fi 名称，并选择 Clash Verge 的 exe 文件。
 
 检查当前 SSID：
 
@@ -36,7 +36,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\WifiClashGuard.ps1 -Check
 
    如果 Windows 的 `python` 命令不可用，也可以直接双击 `start_guard.bat`；本机 Python 安装器路径下的 `pythonw.exe` 会被自动优先使用。
 
-如果托盘菜单暂时没有弹出设置窗口，可以直接运行：
+托盘菜单的设置项会启动独立设置窗口，不依赖托盘窗口。也可以直接运行：
 
 ```powershell
 python -X utf8 wifi_clash_guard.py --settings
@@ -52,7 +52,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\WifiClashGuard.ps1 -Settings
 
 或者双击 `open_settings.ps1`。
 
-4. 从托盘图标进入“管理危险 SSID”，手动添加需要提醒的 Wi-Fi 名称，并选择 Clash Verge 的 exe 文件。
+4. 从托盘图标进入“设置（SSID 与 Clash 路径）”，手动添加需要提醒的 Wi-Fi 名称，并选择 Clash Verge 的 exe 文件。
 5. 保存后，可以使用“启动 Clash Verge”菜单启动；危险 SSID 下会先弹窗确认。
 
 ## 把它接到桌面快捷方式
@@ -78,7 +78,9 @@ pythonw.exe C:\路径\wifi-clash-guard\wifi_clash_guard.py --launch
 ## 打包 EXE
 
 ```powershell
-pyinstaller --noconfirm --onefile --windowed --name WifiClashGuard wifi_clash_guard.py
+.\build_exe.ps1 -Version v0.1.2
 ```
+
+构建脚本会先检查 Python 的 Tcl/Tk 是否可用；如果本机 Python 缺少 Tcl/Tk，建议使用 GitHub Actions 构建发布版。
 
 打包后，可将 `dist\WifiClashGuard.exe --launch` 设置为 Clash Verge 的快捷方式目标。托盘程序则直接运行 `dist\WifiClashGuard.exe`。

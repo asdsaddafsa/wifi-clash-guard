@@ -165,7 +165,7 @@ def startup_command() -> str:
     pythonw = Path(sys.executable).with_name("pythonw.exe")
     script = Path(__file__).resolve()
     if pythonw.exists() and script.suffix == ".py":
-        return f'"{pythonw}" "{script}"'
+        return f'"{pythonw}" "{script}" --tray'
     return f'"{Path(sys.executable).resolve()}" --tray'
 
 
@@ -211,6 +211,140 @@ def show_native_error(message: str) -> None:
     print(message, file=sys.stderr)
 
 
+def launch_settings_process() -> tuple[bool, str]:
+    """Start a visible settings-only process from a tray callback."""
+    if getattr(sys, "frozen", False):
+        command = [str(Path(sys.executable).resolve()), "--settings"]
+    else:
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        executable = pythonw if pythonw.exists() else Path(sys.executable)
+        command = [str(executable), str(Path(__file__).resolve()), "--settings"]
+
+    try:
+        subprocess.Popen(
+            command,
+            cwd=str(Path(__file__).resolve().parent),
+            close_fds=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as exc:
+        return False, f"无法打开设置窗口：{exc}"
+    return True, ""
+
+
+def show_settings_window() -> int:
+    """Run the settings UI as a normal visible Tk application."""
+    config = load_config()
+    root = tk.Tk()
+    root.title("Wi-Fi Clash Guard 设置")
+    root.resizable(False, False)
+
+    frame = ttk.Frame(root, padding=14)
+    frame.grid(sticky="nsew")
+    ttk.Label(frame, text="危险 SSID（匹配不区分大小写）").grid(
+        row=0, column=0, columnspan=2, sticky="w"
+    )
+    ssid_list = tk.Listbox(frame, height=8, width=42, exportselection=False)
+    ssid_list.grid(row=1, column=0, rowspan=4, padx=(0, 8), pady=(6, 10))
+    for item in config["dangerous_ssids"]:
+        ssid_list.insert(tk.END, item)
+
+    def add_ssid() -> None:
+        value = simpledialog.askstring("添加危险 SSID", "请输入完整 SSID：", parent=root)
+        if value and value.strip():
+            value = value.strip()
+            current = [ssid_list.get(i) for i in range(ssid_list.size())]
+            if value.casefold() not in {x.casefold() for x in current}:
+                ssid_list.insert(tk.END, value)
+
+    def edit_ssid() -> None:
+        selection = ssid_list.curselection()
+        if not selection:
+            messagebox.showinfo(APP_NAME, "请先选择一个 SSID。", parent=root)
+            return
+        index = selection[0]
+        value = simpledialog.askstring(
+            "修改危险 SSID",
+            "请输入完整 SSID：",
+            initialvalue=ssid_list.get(index),
+            parent=root,
+        )
+        if value and value.strip():
+            ssid_list.delete(index)
+            ssid_list.insert(index, value.strip())
+
+    def delete_ssid() -> None:
+        for index in reversed(ssid_list.curselection()):
+            ssid_list.delete(index)
+
+    ttk.Button(frame, text="添加", command=add_ssid).grid(row=1, column=1, sticky="ew")
+    ttk.Button(frame, text="修改", command=edit_ssid).grid(
+        row=2, column=1, sticky="ew", pady=4
+    )
+    ttk.Button(frame, text="删除", command=delete_ssid).grid(row=3, column=1, sticky="ew")
+
+    ttk.Label(frame, text="Clash Verge 可执行文件").grid(
+        row=5, column=0, columnspan=2, sticky="w", pady=(4, 0)
+    )
+    clash_path = tk.StringVar(value=config.get("clash_path", ""))
+    path_entry = ttk.Entry(frame, textvariable=clash_path, width=43)
+    path_entry.grid(row=6, column=0, padx=(0, 8), pady=(6, 10))
+
+    def choose_clash() -> None:
+        selected = filedialog.askopenfilename(
+            parent=root,
+            title="选择 Clash Verge exe",
+            filetypes=[("程序文件", "*.exe"), ("所有文件", "*.*")],
+        )
+        if selected:
+            clash_path.set(selected)
+            path_entry.icursor(tk.END)
+
+    ttk.Button(frame, text="选择…", command=choose_clash).grid(
+        row=6, column=1, sticky="ew"
+    )
+
+    startup_var = tk.BooleanVar(value=bool(config.get("start_with_windows", False)))
+    ttk.Checkbutton(
+        frame,
+        text="Windows 开机自动运行托盘程序",
+        variable=startup_var,
+    ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+    def close_window() -> None:
+        root.destroy()
+
+    def save_and_close() -> None:
+        values = [ssid_list.get(i).strip() for i in range(ssid_list.size())]
+        config["dangerous_ssids"] = normalized_ssids(values)
+        config["clash_path"] = clash_path.get().strip()
+        config["start_with_windows"] = startup_var.get()
+        save_config(config)
+        ok, error = set_startup(startup_var.get())
+        if not ok:
+            messagebox.showerror(APP_NAME, error, parent=root)
+            return
+        close_window()
+
+    buttons = ttk.Frame(frame)
+    buttons.grid(row=8, column=0, columnspan=2, sticky="e")
+    ttk.Button(buttons, text="取消", command=close_window).pack(side=tk.RIGHT, padx=(8, 0))
+    ttk.Button(buttons, text="保存", command=save_and_close).pack(side=tk.RIGHT)
+
+    root.protocol("WM_DELETE_WINDOW", close_window)
+    root.update_idletasks()
+    width = root.winfo_width()
+    height = root.winfo_height()
+    x = max((root.winfo_screenwidth() - width) // 2, 0)
+    y = max((root.winfo_screenheight() - height) // 2, 0)
+    root.geometry(f"{width}x{height}+{x}+{y}")
+    root.lift()
+    root.focus_force()
+    path_entry.focus_set()
+    root.mainloop()
+    return 0
+
+
 class GuardApp:
     def __init__(self) -> None:
         self.config = load_config()
@@ -218,9 +352,8 @@ class GuardApp:
         self.root.withdraw()
         self.icon = None
         self._ui_actions: queue.Queue = queue.Queue()
-        self.settings_window: tk.Toplevel | None = None
 
-    def run(self, open_settings: bool = False) -> None:
+    def run(self) -> None:
         if pystray is None:
             messagebox.showerror(
                 APP_NAME,
@@ -233,7 +366,7 @@ class GuardApp:
             APP_NAME,
             menu=pystray.Menu(
                 pystray.MenuItem("启动 Clash Verge", self._tray_launch),
-                pystray.MenuItem("管理危险 SSID", self._tray_settings),
+                pystray.MenuItem("设置（SSID 与 Clash 路径）", self._tray_settings),
                 pystray.MenuItem("检测当前 SSID", self._tray_check),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("退出", self._quit),
@@ -241,8 +374,6 @@ class GuardApp:
         )
         self.icon.run_detached()
         self.root.after(50, self._drain_ui_actions)
-        if open_settings:
-            self.root.after(150, self.open_settings)
         self.root.mainloop()
 
     def _drain_ui_actions(self) -> None:
@@ -272,7 +403,9 @@ class GuardApp:
         self._call_on_ui(self.launch_clash)
 
     def _tray_settings(self, *_args) -> None:
-        self._call_on_ui(self.open_settings)
+        ok, error = launch_settings_process()
+        if not ok:
+            show_native_error(error)
 
     def _tray_check(self, *_args) -> None:
         self._call_on_ui(self.show_current_ssid)
@@ -309,117 +442,6 @@ class GuardApp:
         text = ssid or "无法读取（未连接 Wi‑Fi、使用网线或系统命令不可用）"
         messagebox.showinfo(APP_NAME, f"当前 SSID：{text}")
 
-    def open_settings(self) -> None:
-        if self.settings_window is not None and self.settings_window.winfo_exists():
-            self.settings_window.deiconify()
-            self.settings_window.lift()
-            self.settings_window.focus_force()
-            return
-
-        window = tk.Toplevel(self.root)
-        self.settings_window = window
-        window.title("Wi-Fi Clash Guard 设置")
-        window.resizable(False, False)
-        window.transient(self.root)
-
-        frame = ttk.Frame(window, padding=14)
-        frame.grid(sticky="nsew")
-        ttk.Label(frame, text="危险 SSID（匹配不区分大小写）").grid(
-            row=0, column=0, columnspan=2, sticky="w"
-        )
-        ssid_list = tk.Listbox(frame, height=8, width=42, exportselection=False)
-        ssid_list.grid(row=1, column=0, rowspan=4, padx=(0, 8), pady=(6, 10))
-        for item in self.config["dangerous_ssids"]:
-            ssid_list.insert(tk.END, item)
-
-        def add_ssid() -> None:
-            value = simpledialog.askstring("添加危险 SSID", "请输入完整 SSID：", parent=window)
-            if value and value.strip():
-                value = value.strip()
-                current = [ssid_list.get(i) for i in range(ssid_list.size())]
-                if value.casefold() not in {x.casefold() for x in current}:
-                    ssid_list.insert(tk.END, value)
-
-        def edit_ssid() -> None:
-            selection = ssid_list.curselection()
-            if not selection:
-                messagebox.showinfo(APP_NAME, "请先选择一个 SSID。", parent=window)
-                return
-            index = selection[0]
-            value = simpledialog.askstring(
-                "修改危险 SSID", "请输入完整 SSID：", initialvalue=ssid_list.get(index), parent=window
-            )
-            if value and value.strip():
-                ssid_list.delete(index)
-                ssid_list.insert(index, value.strip())
-
-        def delete_ssid() -> None:
-            for index in reversed(ssid_list.curselection()):
-                ssid_list.delete(index)
-
-        ttk.Button(frame, text="添加", command=add_ssid).grid(row=1, column=1, sticky="ew")
-        ttk.Button(frame, text="修改", command=edit_ssid).grid(row=2, column=1, sticky="ew", pady=4)
-        ttk.Button(frame, text="删除", command=delete_ssid).grid(row=3, column=1, sticky="ew")
-
-        ttk.Label(frame, text="Clash Verge 可执行文件").grid(
-            row=5, column=0, columnspan=2, sticky="w", pady=(4, 0)
-        )
-        clash_path = tk.StringVar(value=self.config.get("clash_path", ""))
-        path_entry = ttk.Entry(frame, textvariable=clash_path, width=43)
-        path_entry.grid(row=6, column=0, padx=(0, 8), pady=(6, 10))
-
-        def choose_clash() -> None:
-            selected = filedialog.askopenfilename(
-                parent=window,
-                title="选择 Clash Verge exe",
-                filetypes=[("程序文件", "*.exe"), ("所有文件", "*.*")],
-            )
-            if selected:
-                clash_path.set(selected)
-
-        ttk.Button(frame, text="选择…", command=choose_clash).grid(row=6, column=1, sticky="ew")
-
-        startup_var = tk.BooleanVar(value=bool(self.config.get("start_with_windows", False)))
-        ttk.Checkbutton(frame, text="Windows 开机自动运行托盘程序", variable=startup_var).grid(
-            row=7, column=0, columnspan=2, sticky="w", pady=(0, 8)
-        )
-
-        def close_window() -> None:
-            try:
-                window.grab_release()
-            except tk.TclError:
-                pass
-            self.settings_window = None
-            window.destroy()
-
-        def save_and_close() -> None:
-            values = [ssid_list.get(i).strip() for i in range(ssid_list.size())]
-            values = normalized_ssids(values)
-            self.config["dangerous_ssids"] = values
-            self.config["clash_path"] = clash_path.get().strip()
-            self.config["start_with_windows"] = startup_var.get()
-            save_config(self.config)
-            ok, error = set_startup(startup_var.get())
-            if not ok:
-                messagebox.showerror(APP_NAME, error, parent=window)
-                return
-            close_window()
-
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=8, column=0, columnspan=2, sticky="e")
-        ttk.Button(buttons, text="取消", command=close_window).pack(side=tk.RIGHT, padx=(8, 0))
-        ttk.Button(buttons, text="保存", command=save_and_close).pack(side=tk.RIGHT)
-
-        # A Toplevel transient to a withdrawn root can otherwise appear behind
-        # the desktop on some Windows configurations.
-        window.protocol("WM_DELETE_WINDOW", close_window)
-        window.update_idletasks()
-        window.deiconify()
-        window.lift()
-        window.focus_force()
-        window.grab_set()
-
-
 def launch_once() -> int:
     config = load_config()
     ssid = get_current_ssid()
@@ -452,12 +474,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=APP_NAME)
     parser.add_argument("--launch", action="store_true", help="检查网络后启动 Clash Verge")
     parser.add_argument("--tray", action="store_true", help="启动托盘程序")
-    parser.add_argument("--settings", action="store_true", help="启动托盘程序并直接打开设置")
+    parser.add_argument("--settings", action="store_true", help="仅打开设置窗口")
     args = parser.parse_args()
     try:
         if args.launch:
             return launch_once()
-        GuardApp().run(open_settings=args.settings)
+        if args.settings:
+            return show_settings_window()
+        GuardApp().run()
         return 0
     except tk.TclError as exc:
         show_native_error(
