@@ -86,8 +86,152 @@ def normalized_ssids(values: Any) -> list[str]:
     return result
 
 
+def decode_ssid_bytes(raw: bytes) -> str:
+    """Decode the raw SSID bytes returned by the Windows WLAN API."""
+    if not raw:
+        return ""
+
+    candidates: list[str] = []
+    for encoding in ("utf-8-sig", "mbcs", "gb18030", "big5", "latin-1"):
+        try:
+            decoded = raw.decode(encoding, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            continue
+        if decoded and decoded not in candidates:
+            candidates.append(decoded)
+
+    # Prefer the first strict candidate. UTF-8 is checked first, while a
+    # legacy Chinese SSID falls through to the Windows ANSI code page/GB18030.
+    return candidates[0].strip() if candidates else raw.decode("latin-1", errors="replace").strip()
+
+
+def _get_current_ssid_wlanapi() -> str | None:
+    """Read the connected SSID through wlanapi.dll, avoiding console encoding."""
+    if os.name != "nt":
+        return None
+
+    class Guid(ctypes.Structure):
+        _fields_ = [
+            ("Data1", ctypes.c_ulong),
+            ("Data2", ctypes.c_ushort),
+            ("Data3", ctypes.c_ushort),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    class Dot11Ssid(ctypes.Structure):
+        _fields_ = [("uSSIDLength", ctypes.wintypes.DWORD), ("ucSSID", ctypes.c_ubyte * 32)]
+
+    class WlanAssociationAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Dot11Ssid", Dot11Ssid),
+            ("Dot11BssType", ctypes.c_uint),
+            ("Dot11Bssid", ctypes.c_ubyte * 6),
+            ("dot11PhyType", ctypes.c_uint),
+            ("uDot11PhyIndex", ctypes.wintypes.DWORD),
+            ("wlanSignalQuality", ctypes.wintypes.DWORD),
+            ("ulRxRate", ctypes.wintypes.DWORD),
+            ("ulTxRate", ctypes.wintypes.DWORD),
+        ]
+
+    class WlanSecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("bSecurityEnabled", ctypes.wintypes.BOOL),
+            ("dot11AuthAlgorithm", ctypes.c_uint),
+            ("dot11CipherAlgorithm", ctypes.c_uint),
+        ]
+
+    class WlanConnectionAttributes(ctypes.Structure):
+        _fields_ = [
+            ("isState", ctypes.c_uint),
+            ("wlanConnectionMode", ctypes.c_uint),
+            ("strProfileName", ctypes.c_wchar * 256),
+            ("wlanAssociationAttributes", WlanAssociationAttributes),
+            ("wlanSecurityAttributes", WlanSecurityAttributes),
+        ]
+
+    class WlanInterfaceInfo(ctypes.Structure):
+        _fields_ = [
+            ("InterfaceGuid", Guid),
+            ("strInterfaceDescription", ctypes.c_wchar * 256),
+            ("isState", ctypes.c_uint),
+        ]
+
+    class WlanInterfaceInfoList(ctypes.Structure):
+        _fields_ = [
+            ("dwNumberOfItems", ctypes.wintypes.DWORD),
+            ("dwIndex", ctypes.wintypes.DWORD),
+            ("InterfaceInfo", WlanInterfaceInfo * 1),
+        ]
+
+    try:
+        wlanapi = ctypes.WinDLL("wlanapi.dll")
+        client_handle = ctypes.wintypes.HANDLE()
+        negotiated_version = ctypes.wintypes.DWORD()
+        result = wlanapi.WlanOpenHandle(
+            2, None, ctypes.byref(negotiated_version), ctypes.byref(client_handle)
+        )
+        if result != 0:
+            return None
+
+        interface_list = ctypes.c_void_p()
+        connection_data = ctypes.c_void_p()
+        try:
+            result = wlanapi.WlanEnumInterfaces(
+                client_handle, None, ctypes.byref(interface_list)
+            )
+            if result != 0 or not interface_list.value:
+                return None
+
+            info_list = ctypes.cast(
+                interface_list, ctypes.POINTER(WlanInterfaceInfoList)
+            ).contents
+            interface_array = (WlanInterfaceInfo * info_list.dwNumberOfItems).from_address(
+                ctypes.addressof(info_list.InterfaceInfo)
+            )
+            for interface in interface_array:
+                # wlan_interface_state_connected == 1
+                if interface.isState != 1:
+                    continue
+                data_size = ctypes.wintypes.DWORD()
+                opcode_type = ctypes.c_uint()
+                result = wlanapi.WlanQueryInterface(
+                    client_handle,
+                    ctypes.byref(interface.InterfaceGuid),
+                    7,  # wlan_intf_opcode_current_connection
+                    None,
+                    ctypes.byref(data_size),
+                    ctypes.byref(connection_data),
+                    ctypes.byref(opcode_type),
+                )
+                if result != 0 or not connection_data.value:
+                    continue
+                attributes = ctypes.cast(
+                    connection_data, ctypes.POINTER(WlanConnectionAttributes)
+                ).contents
+                ssid = attributes.wlanAssociationAttributes.Dot11Ssid
+                length = min(int(ssid.uSSIDLength), len(ssid.ucSSID))
+                decoded = decode_ssid_bytes(bytes(ssid.ucSSID[:length]))
+                if decoded:
+                    return decoded
+                wlanapi.WlanFreeMemory(connection_data)
+                connection_data = ctypes.c_void_p()
+            return None
+        finally:
+            if connection_data.value:
+                wlanapi.WlanFreeMemory(connection_data)
+            if interface_list.value:
+                wlanapi.WlanFreeMemory(interface_list)
+            wlanapi.WlanCloseHandle(client_handle, None)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
 def get_current_ssid() -> str | None:
     """Return the first connected Wi-Fi SSID, or None if it cannot be read."""
+    api_ssid = _get_current_ssid_wlanapi()
+    if api_ssid:
+        return api_ssid
+
     try:
         completed = subprocess.run(
             ["netsh", "wlan", "show", "interfaces"],
